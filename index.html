@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="utf-8">
+		<title>My first three.js app</title>
+		<style>
+			body { margin: 0; }
+		</style>
+	</head>
+	<body>
+		<script src="js/three.js"></script>
+    <script src="js/quadtree.js"></script>
+
+		<script>
+      var camera = undefined;
+      var quadtree = undefined;
+      var mouseMesh = undefined;
+      var mousePos = new THREE.Vector3(0,0,0);
+      var mouseObj = {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1
+      };
+
+      /*
+      var cursorX;
+      var cursorY;
+      document.onmousemove = function(e){
+        var mouseVec = new THREE.Vector3(); // create once and reuse
+        var mousePos = new THREE.Vector3(); // create once and reuse
+        mouseVec.set(
+            ( event.clientX / window.innerWidth ) * 2 - 1,
+            - ( event.clientY / window.innerHeight ) * 2 + 1,
+            0.5 );
+        mouseVec.unproject( camera );
+        mouseVec.sub( camera.position ).normalize();
+        var distance = - camera.position.z / mouseVec.z;
+        mousePos.copy( camera.position ).add( mouseVec.multiplyScalar( distance ) );
+        mouseObj.x = mousePos.x;
+        mouseObj.y = mousePos.y;
+        mouseMesh.position.x = mousePos.x;
+        mouseMesh.position.y = mousePos.y;
+      }
+      */
+
+      window.addEventListener("load", function() {
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x14141a);
+      camera = new THREE.PerspectiveCamera( 75, window.innerWidth / window.innerHeight, 0.1, 1000 );
+
+      const renderer = new THREE.WebGLRenderer();
+      renderer.setSize( window.innerWidth, window.innerHeight );
+      let MW = 10;
+      let MH = 8;
+      let X_MIN = -MW/2;
+      let X_MAX =  MW/2;
+      let Y_MIN = -MH/2;
+      let Y_MAX =  MH/2;
+      antQuadtree = new Quadtree({
+        x: -MW/2,
+        y: -MH/2,
+        width: MW,
+        height: MH
+      }, 5, 4);
+      morselQuadtree = new Quadtree({
+        x: -MW/2,
+        y: -MH/2,
+        width: MW,
+        height: MH
+      }, 5, 4);
+      document.body.appendChild( renderer.domElement );
+
+      let randomPaddedValue = function(min, max, radius) {
+        return Math.random()*(max-min-radius*2)+min+radius;
+      }
+
+      const anthillGeometry = new THREE.BufferGeometry();
+      let anthill = {
+        x: 0,
+        y: 0,
+        radius: 0
+      };
+      anthill.radius = 0.3;
+      anthill.x = randomPaddedValue(X_MIN, X_MAX, anthill.radius);
+      anthill.y = randomPaddedValue(Y_MIN, Y_MAX, anthill.radius);
+      let anthill_n = 12;
+      let anthill_pts = [];
+      let last = null;
+      for(let i=0; i<=anthill_n; i++) {
+        let a = Math.PI*2*i/anthill_n;
+        let x = anthill.x + anthill.radius*Math.cos(a);
+        let y = anthill.y + anthill.radius*Math.sin(a);
+
+        if(last != null) {
+          anthill_pts.push(anthill.x, anthill.y, 0);
+          anthill_pts.push(last[0], last[1], 0);
+          anthill_pts.push(x, y, 0);
+        }
+        last = [x, y];
+      }
+
+      let anthillVertices = new Float32Array(anthill_pts);
+      anthillGeometry.setAttribute('position', new THREE.BufferAttribute(anthillVertices, 3));
+      const anthillMaterial = new THREE.MeshBasicMaterial({color: 0x4d3624});
+      anthillMesh = new THREE.Mesh(anthillGeometry, anthillMaterial);
+      scene.add(anthillMesh);
+
+      const antGeometry = new THREE.BufferGeometry();
+      let antScale = 0.1;
+      const antVertices = new Float32Array( [
+        -antScale*Math.sin(Math.PI/3), -antScale*Math.cos(Math.PI/3),  0.0,
+        antScale*Math.sin(Math.PI/3), -antScale*Math.cos(Math.PI/3),  0.0,
+        0.0,  antScale*1.0,  0.0
+      ] );
+      antGeometry.setAttribute( 'position', new THREE.BufferAttribute( antVertices, 3 ) );
+
+      //const mouseMaterial = new THREE.MeshBasicMaterial( { color: 0x888888 } );
+      //mouseMesh = new THREE.Mesh( antGeometry, mouseMaterial );
+      //scene.add( mouseMesh );
+
+      let ants = [];
+      let morsels = [];
+      let tempLines = [];
+
+      const RED = 0;
+      const GREEN = 1;
+      const BLUE = 2;
+      const lineMaterials = [
+        new THREE.LineBasicMaterial( { color: 0xff0000 } ),
+        new THREE.LineBasicMaterial( { color: 0x00ff00 } ),
+        new THREE.LineBasicMaterial( { color: 0x0000ff } )
+      ];
+
+      function addTempLine(colorIndex, ...vecs) {
+        let material = lineMaterials[colorIndex];
+        let points = [];
+        for(let vec of vecs) {
+          points.push( vec );
+        }
+        const geometry = new THREE.BufferGeometry().setFromPoints( points );
+        const line = new THREE.Line( geometry, material );
+        tempLines.push(line);
+        scene.add(line);
+      }
+
+      function clearTempLines() {
+        for(let line of tempLines) {
+          line.geometry.dispose();
+          line.removeFromParent();
+        }
+        tempLines = [];
+      }
+
+      function normalizeAngle(value, start, end) {
+        let width = end - start;
+        let offsetValue = value - start;
+        return (offsetValue - (Math.floor(offsetValue/width)*width)) + start;
+      }
+
+      function angleDiff(a, b) {
+        let u = a;
+        let v = b;
+        if(u > v) {
+          let temp = u;
+          u = v;
+          v = temp;
+        }
+        let d1 = (v - u);
+        let d2 = Math.PI * 2 - d1;
+        if(d1 < d2) {
+          return d1;
+        }
+        return d2;
+      }
+
+      class Ant {
+
+        static antMaterial = new THREE.MeshBasicMaterial( { color: 0x882222 } );
+        static antWithFoodMaterial = new THREE.MeshBasicMaterial( { color: 0x008844 } );
+
+        static speed = 0.4;
+        static daspeed = 0.6;
+        static aspeed = 3;
+        static DA_MAX = Math.PI/4;
+        static P_DA_0 = 0.96;
+        static P_DA_MAX = 0.80;
+        static A = -(Ant.P_DA_MAX-Ant.P_DA_0)/(Ant.DA_MAX*Ant.DA_MAX);
+        static VIEW_DIST = 0.3;
+
+        constructor() {
+          this.mesh = new THREE.Mesh( antGeometry, Ant.antMaterial );
+          //this.mesh.material = Ant.antWithFoodMaterial;
+          scene.add( this.mesh );
+          //this.mesh.rotateZ(Math.random()*Math.PI*2);
+          this.a = Math.random()*Math.PI*2;
+          this.da = (Math.random()*2-1)*Ant.DA_MAX;
+          this.width = 1;
+          this.height = 1;
+          this.refreshCoords();
+        }
+
+        update(delta) {
+          this.da += Ant.daspeed * Math.sign(this.da);
+          this.da = Ant.clamp(this.da, -Ant.DA_MAX, Ant.DA_MAX);
+          this.decide_turning();
+          this.a += this.da * Ant.aspeed * delta;
+          this.a = normalizeAngle(this.a, 0, Math.PI*2);
+          this.mesh.translateX(Math.cos(this.a) * Ant.speed * delta);
+          this.mesh.translateY(Math.sin(this.a) * Ant.speed * delta);
+          this.reflectOnEdges();
+          this.refreshCoords();
+        }
+
+        reflectOnEdges() {
+          let mx = this.mesh.position.x;
+          let my = this.mesh.position.y;
+          let ma = normalizeAngle(this.a, 0, Math.PI*2);
+          if(mx > X_MAX) {
+            mx = X_MAX;
+            if(ma < Math.PI/2.0 || ma > Math.PI*3/2.0) {
+              ma = Math.PI - ma;
+            }
+          }
+          if(mx < X_MIN) {
+            mx = X_MIN;
+            if(ma > Math.PI/2.0 && ma < Math.PI*3/2.0) {
+              ma = Math.PI - ma;
+            }
+          }
+          if(my < Y_MIN) {
+            my = Y_MIN;
+            if(ma > Math.PI && ma < 2*Math.PI) {
+              ma = 2*Math.PI - ma;
+            }
+          }
+          if(my > Y_MAX) {
+            my = Y_MAX;
+            if(ma < Math.PI) {
+              ma = 2*Math.PI - ma;
+            }
+          }
+          this.a = normalizeAngle(ma, 0, Math.PI*2);
+          this.mesh.position.x = mx;
+          this.mesh.position.y = my;
+        }
+
+        refreshCoords() {
+          this.x = this.mesh.position.x;
+          this.y = this.mesh.position.y;
+        }
+
+        setPosition(x, y) {
+          this.mesh.position.x = x;
+          this.mesh.position.y = y;
+          this.refreshCoords();
+        }
+
+        sense(quadtree, delta) {
+          let candidates = quadtree.retrieve(this);
+          let target = null;
+          for(let candidate of candidates) {
+            if(candidate === this) continue;
+            if(this.distsq(candidate) > Ant.VIEW_DIST*Ant.VIEW_DIST ||
+              !this.angleWithin(candidate, Math.PI/2)) {
+              continue;
+            }
+
+            if(target == null) {
+              target = candidate;
+            } else {
+              target = this.prioritize(candidate, target);
+            }
+          }
+          if(target != null) {
+            this.act(target);
+          }
+        }
+
+        prioritize(a, b) {
+          return a;
+        }
+
+        act(target, delta) {
+          addTempLine(
+            GREEN,
+            new THREE.Vector3(target.x, target.y, 0),
+            new THREE.Vector3(this.x, this.y, 0)
+          );
+        }
+
+        angleWithin(obj, aov) {
+          let vx = obj.x - this.x;
+          let vy = obj.y - this.y;
+          let a = Math.atan2(vy, vx);
+          if(a < 0) {
+            a += Math.PI*2;
+          }
+          let da = angleDiff(a, this.a);
+          return da <= aov/2;
+        }
+
+        decide_turning() {
+          if(Math.random() > -Ant.A*this.da*this.da + Ant.P_DA_0) {
+            this.da = -this.da;
+          }
+        }
+
+        static clamp(val, min, max) {
+          if(val < min) {
+            val = min;
+          } else if(val > max) {
+            val = max;
+          }
+          return val;
+        }
+
+        distsq(target) {
+          return (this.x-target.x)*(this.x-target.x)+(this.y-target.y)*(this.y-target.y);
+        }
+
+      }
+
+      let circleOverlap = function(c1, c2) {
+        let dist = (c1.x-c2.x)*(c1.x-c2.x)+(c1.y-c2.y)*(c1.y-c2.y);
+        return dist <= (c1.radius+c2.radius)*(c1.radius+c2.radius);
+      };
+
+      let NUM_ANTS = 2000;
+      for(let i=0; i<NUM_ANTS; i++) {
+        let ant = new Ant();
+        ant.setPosition(anthill.x, anthill.y);
+        ants.push(ant);
+      }
+
+      let NUM_GROUPS = 6;
+      let step = 0.07;
+      let RINGS_MAX = 20;
+      let RINGS_MIN = 8;
+      let ATTEMPTS_MAX = 5;
+      let KEEP_PROB_INITIAL = 0.3;
+      let KEEP_PROB_FINAL = 0.005;
+      let groups = [];
+      for(let group_index=0; group_index<NUM_GROUPS; group_index++) {
+        let num_rings = Math.floor(Math.random() * (RINGS_MAX - RINGS_MIN) + RINGS_MIN);
+        let new_group = {
+          x: 0,
+          y: 0,
+          radius: step * num_rings,
+          num_rings: num_rings
+        };
+        let collisions = false;
+        let attempts = 0;
+        do {
+          collisions = false;
+          new_group.x = randomPaddedValue(X_MIN, X_MAX, new_group.radius);
+          new_group.y = randomPaddedValue(Y_MIN, Y_MAX, new_group.radius);
+          for(let group of groups) {
+            if(circleOverlap(new_group, group)) {
+              collisions = true;
+              attempts += 1;
+              break;
+            }
+          }
+          if(circleOverlap(new_group, anthill)) {
+            collisions = true;
+            attempts += 1;
+          }
+        } while(collisions && attempts < ATTEMPTS_MAX);
+        if(!collisions) {
+          groups.push(new_group);
+        }
+      }
+
+      let morsel_points = [];
+
+      for(let group of groups) {
+        for(let i=0; i<group.num_rings; i++) {
+          let r = i*step;
+          let alpha = 2*Math.asin(step/(2*r));
+          let norm = i/group.num_rings;
+          let keep_prob = (1-norm)*KEEP_PROB_INITIAL+norm*KEEP_PROB_FINAL;
+          for(let a=0; a<Math.PI*2; a+=alpha) {
+            if(Math.random()>keep_prob) {
+              continue;
+            }
+            let perturb_a = Math.random()*Math.PI*2;
+            let perturb_r = Math.random()*step/2;
+            let perturb_x = perturb_r*Math.cos(perturb_a);
+            let perturb_y = perturb_r*Math.sin(perturb_a);
+            morsel_points.push({
+              x: group.x+r*Math.cos(a)+perturb_x,
+              y: group.y+r*Math.sin(a)+perturb_y,
+              width: 1,
+              height: 1
+            });
+          }
+        }
+      }
+
+      function removeMorsel(morsel_point) {
+        let index = morsel_points.indexOf(morsel_point);
+        if(index > -1) {
+          let removed = morsel_points.splice(index, 1);
+          regenerateMorselData();
+          return removed;
+        }
+        return false;
+      }
+
+      function addMorsel(morsel_point) {
+        morsel_points.push(morsel_point);
+        regenerateMorselData();
+      }
+
+      let morselGeometry = null;
+      let morselPointMesh = null;
+      let morselMaterial = new THREE.PointsMaterial( { color: 0x888888, size: 0.05 } );
+
+      function regenerateMorselData() {
+        if(morselPointMesh != null) {
+          morselPointMesh.removeFromParent();
+        }
+        if(morselGeometry != null) {
+          morselGeometry.dispose();
+        }
+        morselGeometry = new THREE.BufferGeometry();
+        let vertices = [];
+        for(let morsel_point of morsel_points) {
+          vertices.push(morsel_point.x);
+          vertices.push(morsel_point.y);
+          vertices.push(0);
+        }
+        morselGeometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+        morselPointMesh = new THREE.Points(morselGeometry, morselMaterial);
+        scene.add(morselPointMesh);
+
+        morselQuadtree.clear();
+        for(let morsel_point of morsel_points) {
+          morselQuadtree.insert(morsel_point);
+        }
+
+      }
+
+      // primer
+      regenerateMorselData();
+
+      camera.position.z = 6;
+
+      var clock = new THREE.Clock();
+      var delta = 0;
+
+      function renderQuadtree(tree) {
+        if(tree.nodes.length === 0) {
+          // draw the bounds
+          // bounds.x y width height
+          // use this: https://threejs.org/docs/#api/en/geometries/PlaneGeometry
+          var bounds = tree.bounds;
+          let x = bounds.x;
+          let y = bounds.y;
+          let w = bounds.width;
+          let h = bounds.height;
+          addTempLine(
+            BLUE,
+            new THREE.Vector3( x  , y  , 0 ),
+            new THREE.Vector3( x+w, y  , 0 ),
+            new THREE.Vector3( x+w, y+h, 0 ),
+            new THREE.Vector3( x  , y+h, 0 ),
+            new THREE.Vector3( x  , y  , 0 )
+          );
+        } else {
+          for(let i=0; i<tree.nodes.length; i=i+1) {
+            renderQuadtree(tree.nodes[i]);
+          }
+        }
+      }
+
+      function disposeChildren(obj) {
+        for(let child of obj.children) {
+          child.geometry.dispose();
+        }
+      }
+
+      function animate() {
+        requestAnimationFrame( animate );
+        antQuadtree.clear();
+        delta = clock.getDelta();
+        for(ant of ants) {
+          ant.update(delta);
+          antQuadtree.insert(ant);
+        }
+        for(ant of ants) {
+          ant.sense(morselQuadtree, delta);
+        }
+        //renderQuadtree(morselQuadtree);
+        renderer.render( scene, camera );
+        clearTempLines();
+      }
+      animate();
+    });
+    </script>
+	</body>
+</html>
